@@ -1,4 +1,5 @@
-User-agent: *
+﻿User-agent: *
 Allow: /
 
-Sitemap: https://NEON-DASH-URL/sitemap.xml
+Sitemap: https://domaine-saint-geoire.github.io/neon-dash/sitemap.xml
+
