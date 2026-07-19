@@ -14,6 +14,9 @@
 <meta property="og:image" content="https://domaine-saint-geoire.github.io/neon-dash/icon.svg">
 <link rel="canonical" href="https://domaine-saint-geoire.github.io/neon-dash/">
 <meta name="twitter:card" content="summary">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="icon.svg">
@@ -148,9 +151,16 @@ if('serviceWorker' in navigator && location.protocol.startsWith('http')){
     max-width:520px; width:100%; margin:0 auto; }
   #lbName label { font-size:13px; color:#8fb3e8; letter-spacing:1px; white-space:nowrap; }
   #nameIn { flex:1; min-width:0; background:rgba(0,0,0,.4); border:1.5px solid #2a3a6a; border-radius:10px;
-    padding:9px 12px; color:#eaf6ff; font-weight:800; letter-spacing:1px; font-size:14px; outline:none; }
+    padding:9px 12px; color:#eaf6ff; font-weight:800; letter-spacing:1px; font-size:16px; outline:none;
+    user-select:text !important; -webkit-user-select:text !important; touch-action:auto; }
   #nameIn:focus { border-color:#0ff; box-shadow:0 0 10px rgba(0,255,255,.3); }
-  #nameMsg { font-size:11px; color:#ff5d7a; min-height:14px; text-align:center; padding-top:4px; }
+  #nameOk { flex:0 0 auto; background:rgba(0,255,255,.1); border:1.5px solid #0ff; color:#0ff;
+    padding:9px 16px; border-radius:10px; font-weight:800; font-size:13px; letter-spacing:1px; cursor:pointer; }
+  #nameOk:active { transform:scale(.95); }
+  #nameMsg { font-size:12px; color:#ff5d7a; min-height:16px; text-align:center; padding-top:4px; }
+  #nameMsg.ok { color:#3fe08f; }
+  #nameMsg.neutral { color:#8fb3e8; }
+  #board, #settings, #shop { touch-action:pan-y; }        /* mobile: panels scroll, inputs stay tappable */
   #lbList { flex:1; overflow-y:auto; padding:10px 16px 24px; max-width:520px; width:100%; margin:0 auto; }
   .lbRow { display:flex; align-items:center; gap:12px; padding:10px 12px; border-radius:10px; margin-bottom:6px;
     background:rgba(15,20,45,.5); border:1px solid #1c2850; }
@@ -229,11 +239,12 @@ if('serviceWorker' in navigator && location.protocol.startsWith('http')){
   </div>
   <div id="lbName">
     <label>Ton pseudo</label>
-    <input id="nameIn" maxlength="14" placeholder="2 à 14 caractères" autocomplete="off">
+    <input id="nameIn" maxlength="14" placeholder="2 à 14 caractères" autocomplete="off" enterkeyhint="done">
+    <button id="nameOk">OK</button>
   </div>
   <div id="nameMsg"></div>
   <div id="lbList"></div>
-  <div id="lbNote">Les scores sont enregistrés sur cet appareil à chaque partie.</div>
+  <div id="lbNote">Seules les parties jouées avec un pseudo enregistré apparaissent ici.</div>
 </div>
 
 <div id="settings" class="hidden">
@@ -249,6 +260,7 @@ if('serviceWorker' in navigator && location.protocol.startsWith('http')){
     <div class="sopt"><span>Effets sonores</span><div class="sw" id="swSfx"></div></div>
     <div class="sopt"><span>Volume des effets</span><input type="range" id="volSfx" min="0" max="100" step="5" value="100"></div>
     <div class="sHead">IMAGE</div>
+    <div class="sopt"><span>Plein écran en jeu<span class="sNote">passe en plein écran au lancement d'une partie</span></span><div class="sw" id="swFs"></div></div>
     <div class="sopt"><span>Secousses de l'écran</span><div class="sw" id="swShake"></div></div>
     <div class="sopt"><span>Mode performance<span class="sNote">moins de particules — pour les petites machines</span></span><div class="sw" id="swPerf"></div></div>
     <div class="sopt"><span>Compteur d'images par seconde</span><div class="sw" id="swFps"></div></div>
@@ -837,6 +849,7 @@ const SET = {
   shake: localStorage.nd_shake!=='0',
   perf:  localStorage.nd_perf==='1',
   fps:   localStorage.nd_fps==='1',
+  fs:    localStorage.nd_fs!=='0',
   vol:   localStorage.nd_vol!=null ? Math.max(0,Math.min(1,parseFloat(localStorage.nd_vol))) : 1,
   sfxVol:localStorage.nd_sfxvol!=null ? Math.max(0,Math.min(1,parseFloat(localStorage.nd_sfxvol))) : 1,
 };
@@ -1671,7 +1684,17 @@ function die(){
 }
 
 let runCoins=0, lastRun=null, recordShown=false;
+// fullscreen: hide the browser bars while playing (needs a user gesture — starting a run is one)
+function goFullscreen(){
+  try{
+    const el=document.documentElement;
+    if(document.fullscreenElement || document.webkitFullscreenElement) return;
+    const req=el.requestFullscreen||el.webkitRequestFullscreen;
+    if(req){ const p=req.call(el); if(p && p.catch) p.catch(()=>{}); }
+  }catch(e){}
+}
 function start(){
+  if(SET.fs) goFullscreen();
   audio(); if(AC && AC.state==='suspended') AC.resume();
   musicStart('game');
   reset(); runCoins=0; recordShown=false; state='play';
@@ -2290,12 +2313,14 @@ requestAnimationFrame(loop);
 function press(e){ if(e.cancelable) e.preventDefault();
   if(state==='play') jump();
 }
-window.addEventListener('keydown',e=>{ if(e.code==='Space'||e.code==='ArrowUp'){ e.preventDefault();
+const typingNow=()=>{ const a=document.activeElement; return a && (a.tagName==='INPUT'||a.tagName==='TEXTAREA'); };
+window.addEventListener('keydown',e=>{ if(e.code==='Space'||e.code==='ArrowUp'){
+  if(typingNow()) return;                                // never steal keys from a text field
+  e.preventDefault();
   if(state==='menu'||state==='dead'){ if(!overlay.classList.contains('hidden')
     && document.getElementById('shop').classList.contains('hidden')
     && document.getElementById('settings').classList.contains('hidden')
-    && document.getElementById('board').classList.contains('hidden')
-    && document.activeElement!==document.getElementById('nameIn')) start(); } else jump(); } });
+    && document.getElementById('board').classList.contains('hidden')) start(); } else jump(); } });
 cv.addEventListener('pointerdown',press,{passive:false});
 window.addEventListener('touchmove',e=>{ if(e.cancelable) e.preventDefault(); },{passive:false});
 playBtn.addEventListener('click', start);
@@ -2512,10 +2537,13 @@ function lbNameOk(raw){
 }
 function lbLoad(){ try{ return JSON.parse(localStorage.nd_lb||'[]'); }catch(e){ return []; } }
 function lbSave(list){ localStorage.nd_lb=JSON.stringify(list); }
+// migration : on ne garde que les entrées nommées (les vieux « Anonyme » disparaissent)
+lbSave(lbLoad().filter(e=>e.n && e.n!=='Anonyme'));
 function lbSubmit(score){
   if(score<1) return;
   const check=lbNameOk(localStorage.nd_name||'');
-  const name=check.ok ? check.name : 'Anonyme';
+  if(!check.ok) return;                                // pas de pseudo enregistré → la partie n'est pas classée
+  const name=check.name;
   let list=lbLoad();
   list.push({n:name, s:score, t:Date.now()});
   list.sort((a,b)=>b.s-a.s);
@@ -2549,9 +2577,21 @@ function renderBoard(){
     lbList.appendChild(d);
   });
 }
+function nameStatus(){
+  const saved=(localStorage.nd_name||'').trim();
+  if(saved){ nameMsg.className='ok'; nameMsg.textContent='✓ Pseudo enregistré : '+saved+' — tes parties comptent.'; }
+  else { nameMsg.className='neutral'; nameMsg.textContent='Entre ton pseudo et valide : sans lui, tes parties ne sont pas classées.'; }
+}
+function saveName(){
+  const raw=nameIn.value;
+  if(!raw.trim()){ delete localStorage.nd_name; nameStatus(); renderBoard(); return; }
+  const c=lbNameOk(raw);
+  if(c.ok){ localStorage.nd_name=c.name; nameIn.value=c.name; nameStatus(); renderBoard(); nameIn.blur(); }
+  else { nameMsg.className=''; nameMsg.textContent=c.msg; }
+}
 document.getElementById('lbBtn').addEventListener('click',()=>{
-  nameIn.value=localStorage.nd_name||''; nameMsg.textContent='';
-  renderBoard(); boardEl.classList.remove('hidden');
+  nameIn.value=localStorage.nd_name||'';
+  nameStatus(); renderBoard(); boardEl.classList.remove('hidden');
 });
 document.getElementById('lbBack').addEventListener('click',()=>boardEl.classList.add('hidden'));
 document.querySelectorAll('#board .stab').forEach(t=>t.addEventListener('click',()=>{
@@ -2559,11 +2599,14 @@ document.querySelectorAll('#board .stab').forEach(t=>t.addEventListener('click',
   document.querySelectorAll('#board .stab').forEach(x=>x.classList.toggle('on',x===t));
   renderBoard();
 }));
-nameIn.addEventListener('input',()=>{
-  const c=lbNameOk(nameIn.value);
-  if(c.ok){ localStorage.nd_name=c.name; nameMsg.textContent='';
-    lbLoad(); renderBoard(); }
-  else nameMsg.textContent = nameIn.value.trim() ? c.msg : '';
+document.getElementById('nameOk').addEventListener('click',saveName);
+nameIn.addEventListener('keydown',e=>{ e.stopPropagation(); if(e.key==='Enter') saveName(); });
+nameIn.addEventListener('input',()=>{                   // live feedback while typing, saved on OK/Entrée
+  const raw=nameIn.value;
+  if(!raw.trim()){ nameMsg.className='neutral'; nameMsg.textContent='Entre ton pseudo puis valide avec OK.'; return; }
+  const c=lbNameOk(raw);
+  nameMsg.className = c.ok ? 'neutral' : '';
+  nameMsg.textContent = c.ok ? 'Appuie sur OK ou Entrée pour valider.' : c.msg;
 });
 
 // ================= PAUSE : contrôles =================
@@ -2575,6 +2618,7 @@ document.getElementById('pauseSetBtn').addEventListener('click', ()=>{ syncSetti
   document.getElementById('settings').classList.remove('hidden'); });
 window.addEventListener('keydown',e=>{
   if(e.code!=='Escape' && e.code!=='KeyP') return;
+  if(typingNow() && e.code==='KeyP') return;             // let people type the letter p in their name
   const setOpen=!document.getElementById('settings').classList.contains('hidden');
   if(setOpen){ if(e.code==='Escape') document.getElementById('settings').classList.add('hidden'); return; }
   if(state==='play') pauseGame();
@@ -2616,6 +2660,7 @@ function syncSettings(){
   document.getElementById('swShake').classList.toggle('on', SET.shake);
   document.getElementById('swPerf').classList.toggle('on', SET.perf);
   document.getElementById('swFps').classList.toggle('on', SET.fps);
+  document.getElementById('swFs').classList.toggle('on', SET.fs);
   document.getElementById('volRange').value=Math.round(SET.vol*100);
   document.getElementById('volSfx').value=Math.round(SET.sfxVol*100);
   document.getElementById('fps').classList.toggle('hidden', !SET.fps);
@@ -2627,6 +2672,7 @@ document.getElementById('swSfx').addEventListener('click',()=>{ SET.sfx=!SET.sfx
 document.getElementById('swShake').addEventListener('click',()=>{ SET.shake=!SET.shake; localStorage.nd_shake=SET.shake?'1':'0'; syncSettings(); });
 document.getElementById('swPerf').addEventListener('click',()=>{ SET.perf=!SET.perf; localStorage.nd_perf=SET.perf?'1':'0'; syncSettings(); });
 document.getElementById('swFps').addEventListener('click',()=>{ SET.fps=!SET.fps; localStorage.nd_fps=SET.fps?'1':'0'; syncSettings(); });
+document.getElementById('swFs').addEventListener('click',()=>{ SET.fs=!SET.fs; localStorage.nd_fs=SET.fs?'1':'0'; syncSettings(); });
 document.getElementById('volRange').addEventListener('input',e=>{
   SET.vol=(+e.target.value)/100; localStorage.nd_vol=SET.vol; applyVolume(); });
 document.getElementById('volSfx').addEventListener('input',e=>{
