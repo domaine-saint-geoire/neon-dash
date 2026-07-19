@@ -165,6 +165,8 @@ if('serviceWorker' in navigator && location.protocol.startsWith('http')){
     padding:9px 16px; border-radius:10px; font-weight:800; font-size:13px; letter-spacing:1px; cursor:pointer; }
   #nameOk:active { transform:scale(.95); }
   #nameMsg { font-size:12px; color:#ff5d7a; min-height:16px; text-align:center; padding-top:4px; }
+  #lbStatus { text-align:center; font-size:10.5px; color:#5a7db0; letter-spacing:2px; text-transform:uppercase;
+    padding:3px 0 5px; min-height:14px; }
   #nameMsg.ok { color:#3fe08f; }
   #nameMsg.neutral { color:#8fb3e8; }
   #board, #settings, #shop { touch-action:pan-y; }        /* mobile: panels scroll, inputs stay tappable */
@@ -273,8 +275,9 @@ if('serviceWorker' in navigator && location.protocol.startsWith('http')){
     <button id="nameOk">OK</button>
   </div>
   <div id="nameMsg"></div>
+  <div id="lbStatus"></div>
   <div id="lbList"></div>
-  <div id="lbNote">Seules les parties jouées avec un pseudo enregistré apparaissent ici.</div>
+  <div id="lbNote">Classement mondial — chaque joueur apparaît une seule fois, avec son meilleur score. Seules les parties jouées avec un pseudo enregistré comptent.</div>
 </div>
 
 <div id="settings" class="hidden">
@@ -1717,6 +1720,8 @@ let runCoins=0, lastRun=null, recordShown=false;
 // fullscreen: hide the browser bars while playing (needs a user gesture — starting a run is one)
 function goFullscreen(){
   try{
+    // appli installée sur l'écran d'accueil : déjà sans barres, inutile (et ça évite le message du navigateur)
+    if(matchMedia('(display-mode: standalone)').matches || navigator.standalone) return;
     const el=document.documentElement;
     if(document.fullscreenElement || document.webkitFullscreenElement) return;
     const req=el.requestFullscreen||el.webkitRequestFullscreen;
@@ -2361,6 +2366,9 @@ playBtn.addEventListener('click', start);
 // start the calm menu tune on the first user gesture (browsers block audio before that)
 window.addEventListener('pointerdown', function initMenuAudio(){
   window.removeEventListener('pointerdown', initMenuAudio, true);
+  // mobile : plein écran dès le premier contact — le message « mode plein écran » du navigateur
+  // s'affiche pendant le menu et a disparu quand la partie commence
+  if(SET.fs && matchMedia('(pointer:coarse)').matches) goFullscreen();
   if(state==='menu') musicStart('menu');
 }, {capture:true});
 
@@ -2542,8 +2550,9 @@ document.getElementById('shopBack').addEventListener('click',()=>{
 document.querySelectorAll('#shop .stab').forEach(t=>t.addEventListener('click',()=>{ shopTab=t.dataset.t;
   document.querySelectorAll('#shop .stab').forEach(x=>x.classList.toggle('on',x===t)); renderShop(); }));
 
-// ================= CLASSEMENT (local, prêt pour un backend mondial) =================
-const LB_REMOTE = '';                                  // URL REST (ex. Firebase .../scores.json) — vide = local uniquement
+// ================= CLASSEMENT MONDIAL =================
+// Stockage partagé : blob JSON anonyme (lecture/écriture ouvertes, données nettoyées côté client)
+const LB_REMOTE = 'https://jsonblob.com/api/jsonBlob/019f79c1-e029-7736-8ed0-4692c23a41e0';
 const boardEl=document.getElementById('board'), lbList=document.getElementById('lbList'),
       nameIn=document.getElementById('nameIn'), nameMsg=document.getElementById('nameMsg');
 let lbPeriod='week';
@@ -2573,43 +2582,95 @@ function lbLoad(){ try{ return JSON.parse(localStorage.nd_lb||'[]'); }catch(e){ 
 function lbSave(list){ localStorage.nd_lb=JSON.stringify(list); }
 // migration : on ne garde que les entrées nommées (les vieux « Anonyme » disparaissent)
 lbSave(lbLoad().filter(e=>e.n && e.n!=='Anonyme'));
+const lbKey=e=>lbNormalize((e.n||'').trim());
+// nettoie une liste brute : entrées valides uniquement, pseudo filtré, UN joueur = UNE ligne (son meilleur score)
+function lbClean(list){
+  const best=new Map();
+  (Array.isArray(list)?list:[]).forEach(e=>{
+    if(!e || typeof e.n!=='string' || typeof e.s!=='number') return;
+    const s=Math.floor(e.s), t=+e.t||0;
+    if(!(s>=1) || s>9999999) return;
+    if(!lbNameOk(e.n).ok) return;                      // filtre aussi ce que d'autres clients auraient poussé
+    const k=lbNormalize(e.n.trim()), cur=best.get(k);
+    if(!cur || s>cur.s || (s===cur.s && t<cur.t)) best.set(k,{n:e.n.trim(),s,t});
+  });
+  return [...best.values()].sort((a,b)=>b.s-a.s);
+}
+let lbRemoteCache=[], lbRemoteState='off';             // off | loading | on | fail
+function lbFetchJson(url,opt){
+  const ctl=('AbortController' in window)?new AbortController():null;
+  const tm=ctl?setTimeout(()=>ctl.abort(),6000):0;
+  const o=Object.assign({cache:'no-store'},opt||{}); if(ctl) o.signal=ctl.signal;
+  return fetch(url,o).then(r=>{ clearTimeout(tm); if(!r.ok) throw new Error(r.status); return r.json(); },
+    err=>{ clearTimeout(tm); throw err; });
+}
+function lbFetchRemote(){                              // rafraîchit le cache mondial → Promise<bool>
+  lbRemoteState='loading';
+  return lbFetchJson(LB_REMOTE).then(j=>{
+    const arr=(j&&Array.isArray(j.e))?j.e:(Array.isArray(j)?j:[]);
+    lbRemoteCache=lbClean(arr); lbRemoteState='on'; return true;
+  }).catch(()=>{ lbRemoteState='fail'; return false; });
+}
+function lbPush(){                                     // pousse mon record dans le classement mondial
+  const check=lbNameOk(localStorage.nd_name||'');
+  if(!check.ok) return;
+  const mine=lbClean(lbLoad()).find(e=>lbKey(e)===lbNormalize(check.name));
+  if(!mine) return;
+  lbFetchJson(LB_REMOTE).then(j=>{
+    const arr=(j&&Array.isArray(j.e))?j.e:[];
+    arr.push(mine);
+    const merged=lbClean(arr).slice(0,300);
+    lbRemoteCache=merged; lbRemoteState='on';
+    return lbFetchJson(LB_REMOTE,{method:'PUT',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({v:1,g:'neon-dash',e:merged})});
+  }).catch(()=>{});
+}
 function lbSubmit(score){
   if(score<1) return;
   const check=lbNameOk(localStorage.nd_name||'');
   if(!check.ok) return;                                // pas de pseudo enregistré → la partie n'est pas classée
-  const name=check.name;
   let list=lbLoad();
-  list.push({n:name, s:score, t:Date.now()});
+  list.push({n:check.name, s:Math.floor(score), t:Date.now()});
   list.sort((a,b)=>b.s-a.s);
   if(list.length>300) list.length=300;
   lbSave(list);
-  if(LB_REMOTE){                                       // fire-and-forget vers le backend mondial (si branché)
-    fetch(LB_REMOTE).then(r=>r.json()).then(remote=>{
-      const arr=Array.isArray(remote)?remote:(remote&&remote.scores)||[];
-      arr.push({n:name,s:score,t:Date.now()});
-      arr.sort((a,b)=>b.s-a.s); if(arr.length>200) arr.length=200;
-      return fetch(LB_REMOTE,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(arr)});
-    }).catch(()=>{});
-  }
+  lbPush();                                            // sync mondiale, sans bloquer le jeu
+}
+function lbStatusLine(){
+  const el=document.getElementById('lbStatus');
+  if(lbRemoteState==='loading') el.textContent='Classement mondial — mise à jour…';
+  else if(lbRemoteState==='on') el.textContent='Classement mondial — en direct';
+  else if(lbRemoteState==='fail') el.textContent='Hors ligne — scores de cet appareil seulement';
+  else el.textContent='';
 }
 function renderBoard(){
   const now=Date.now();
   const horizon = lbPeriod==='week' ? now-7*864e5 : lbPeriod==='month' ? now-30*864e5 : 0;
-  const myName=(localStorage.nd_name||'').trim();
-  const rows=lbLoad().filter(e=>e.t>=horizon).sort((a,b)=>b.s-a.s).slice(0,10);
+  const myKey=lbNormalize((localStorage.nd_name||'').trim());
+  const pool=lbRemoteCache.concat(lbLoad());           // monde + cet appareil (au cas où la sync a raté)
+  const all=lbClean(pool.filter(e=>(+e.t||0)>=horizon));
+  const rows=all.slice(0,50);
   lbList.innerHTML='';
+  lbStatusLine();
   if(!rows.length){
     const d=document.createElement('div'); d.className='lbEmpty';
     d.textContent='Aucun score sur cette période — va en écrire un.';
     lbList.appendChild(d);
   }
-  rows.forEach((e,i)=>{
+  const mkRow=(e,rank)=>{
     const d=document.createElement('div');
-    d.className='lbRow'+(i===0?' top1':i===1?' top2':i===2?' top3':'')+(e.n===myName?' me':'');
-    d.innerHTML=`<div class="rk">${i+1}</div><div class="nm2"></div><div class="sc">${e.s}</div>`;
+    d.className='lbRow'+(rank===1?' top1':rank===2?' top2':rank===3?' top3':'')+(myKey&&lbKey(e)===myKey?' me':'');
+    d.innerHTML=`<div class="rk">${rank}</div><div class="nm2"></div><div class="sc">${e.s}</div>`;
     d.querySelector('.nm2').textContent=e.n;
-    lbList.appendChild(d);
-  });
+    return d;
+  };
+  rows.forEach((e,i)=>lbList.appendChild(mkRow(e,i+1)));
+  const myIdx=myKey?all.findIndex(e=>lbKey(e)===myKey):-1;
+  if(myIdx>=rows.length){                              // je suis hors du top affiché → ma ligne en bas
+    const sep=document.createElement('div'); sep.className='lbEmpty'; sep.style.padding='4px'; sep.textContent='⋯';
+    lbList.appendChild(sep);
+    lbList.appendChild(mkRow(all[myIdx],myIdx+1));
+  }
 }
 function nameStatus(){
   const saved=(localStorage.nd_name||'').trim();
@@ -2626,6 +2687,7 @@ function saveName(){
 document.getElementById('lbBtn').addEventListener('click',()=>{
   nameIn.value=localStorage.nd_name||'';
   nameStatus(); renderBoard(); boardEl.classList.remove('hidden');
+  lbFetchRemote().then(()=>{ if(!boardEl.classList.contains('hidden')) renderBoard(); });
 });
 document.getElementById('lbBack').addEventListener('click',()=>boardEl.classList.add('hidden'));
 document.querySelectorAll('#board .stab').forEach(t=>t.addEventListener('click',()=>{
