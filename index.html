@@ -277,7 +277,7 @@ if('serviceWorker' in navigator && location.protocol.startsWith('http')){
   <div id="nameMsg"></div>
   <div id="lbStatus"></div>
   <div id="lbList"></div>
-  <div id="lbNote">Classement mondial — chaque joueur apparaît une seule fois, avec son meilleur score. Seules les parties jouées avec un pseudo enregistré comptent.</div>
+  <div id="lbNote">Classement mondial — chaque joueur apparaît une seule fois, avec son meilleur score. Ton pseudo est réservé : si tu en changes, ta ligne est renommée et ton record te suit. Seules les parties jouées avec un pseudo enregistré comptent.</div>
 </div>
 
 <div id="settings" class="hidden">
@@ -2580,21 +2580,42 @@ function lbNameOk(raw){
 }
 function lbLoad(){ try{ return JSON.parse(localStorage.nd_lb||'[]'); }catch(e){ return []; } }
 function lbSave(list){ localStorage.nd_lb=JSON.stringify(list); }
-// migration : on ne garde que les entrées nommées (les vieux « Anonyme » disparaissent)
-lbSave(lbLoad().filter(e=>e.n && e.n!=='Anonyme'));
+// identité stable de ce joueur : un code secret par appareil, attaché à ses scores —
+// c'est lui qui permet de renommer sa ligne au lieu d'en créer une autre
+function lbPid(){
+  let p=localStorage.nd_pid;
+  if(!p || !/^[0-9a-f]{16}$/.test(p)){ p=''; while(p.length<16) p+=Math.floor(Math.random()*16).toString(16); localStorage.nd_pid=p; }
+  return p;
+}
+// migration : on ne garde que les entrées nommées, et l'historique local porte mon identité
+lbSave(lbLoad().filter(e=>e.n && e.n!=='Anonyme').map(e=>e.id?e:Object.assign({},e,{id:lbPid()})));
 const lbKey=e=>lbNormalize((e.n||'').trim());
 // nettoie une liste brute : entrées valides uniquement, pseudo filtré, UN joueur = UNE ligne (son meilleur score)
 function lbClean(list){
-  const best=new Map();
+  const valid=[];
   (Array.isArray(list)?list:[]).forEach(e=>{
     if(!e || typeof e.n!=='string' || typeof e.s!=='number') return;
     const s=Math.floor(e.s), t=+e.t||0;
     if(!(s>=1) || s>9999999) return;
     if(!lbNameOk(e.n).ok) return;                      // filtre aussi ce que d'autres clients auraient poussé
-    const k=lbNormalize(e.n.trim()), cur=best.get(k);
-    if(!cur || s>cur.s || (s===cur.s && t<cur.t)) best.set(k,{n:e.n.trim(),s,t});
+    valid.push({n:e.n.trim(), s, t, id:(typeof e.id==='string' && /^[0-9a-f]{6,32}$/.test(e.id))?e.id:''});
   });
-  return [...best.values()].sort((a,b)=>b.s-a.s);
+  // même identité = même joueur : score max, nom le plus récent (renommages)
+  const byId=new Map(), sansId=[];
+  valid.forEach(e=>{
+    if(!e.id){ sansId.push(e); return; }
+    const c=byId.get(e.id);
+    if(!c){ byId.set(e.id,e); return; }
+    const best=e.s>c.s?e:c, latest=e.t>=c.t?e:c;
+    byId.set(e.id,{n:latest.n, s:best.s, t:best.t, id:e.id});
+  });
+  // un pseudo = une ligne (collisions résiduelles : meilleur score gagne)
+  const byName=new Map();
+  [...byId.values()].concat(sansId).forEach(e=>{
+    const k=lbKey(e), c=byName.get(k);
+    if(!c || e.s>c.s || (e.s===c.s && e.t<c.t)) byName.set(k,e);
+  });
+  return [...byName.values()].sort((a,b)=>b.s-a.s);
 }
 let lbRemoteCache=[], lbRemoteState='off';             // off | loading | on | fail
 function lbFetchJson(url,opt){
@@ -2614,11 +2635,16 @@ function lbFetchRemote(){                              // rafraîchit le cache m
 function lbPush(){                                     // pousse mon record dans le classement mondial
   const check=lbNameOk(localStorage.nd_name||'');
   if(!check.ok) return;
-  const mine=lbClean(lbLoad()).find(e=>lbKey(e)===lbNormalize(check.name));
+  const pid=lbPid(), myKey=lbNormalize(check.name);
+  const mine=lbClean(lbLoad()).find(e=>lbKey(e)===myKey);
   if(!mine) return;
+  const my={n:check.name, s:mine.s, t:mine.t, id:pid};
   lbFetchJson(LB_REMOTE).then(j=>{
-    const arr=(j&&Array.isArray(j.e))?j.e:[];
-    arr.push(mine);
+    let arr=(j&&Array.isArray(j.e))?j.e:[];
+    // migration : une vieille ligne à mon nom sans propriétaire devient la mienne
+    arr=arr.map(e=> (e && !e.id && typeof e.n==='string' && lbNormalize(e.n.trim())===myKey)
+      ? Object.assign({},e,{id:pid}) : e);
+    arr.push(my);
     const merged=lbClean(arr).slice(0,300);
     lbRemoteCache=merged; lbRemoteState='on';
     return lbFetchJson(LB_REMOTE,{method:'PUT',headers:{'Content-Type':'application/json'},
@@ -2647,6 +2673,7 @@ function renderBoard(){
   const now=Date.now();
   const horizon = lbPeriod==='week' ? now-7*864e5 : lbPeriod==='month' ? now-30*864e5 : 0;
   const myKey=lbNormalize((localStorage.nd_name||'').trim());
+  const myPid=localStorage.nd_pid||'';
   const pool=lbRemoteCache.concat(lbLoad());           // monde + cet appareil (au cas où la sync a raté)
   const all=lbClean(pool.filter(e=>(+e.t||0)>=horizon));
   const rows=all.slice(0,50);
@@ -2659,13 +2686,14 @@ function renderBoard(){
   }
   const mkRow=(e,rank)=>{
     const d=document.createElement('div');
-    d.className='lbRow'+(rank===1?' top1':rank===2?' top2':rank===3?' top3':'')+(myKey&&lbKey(e)===myKey?' me':'');
+    const moi=(myPid&&e.id===myPid)||(myKey&&lbKey(e)===myKey);
+    d.className='lbRow'+(rank===1?' top1':rank===2?' top2':rank===3?' top3':'')+(moi?' me':'');
     d.innerHTML=`<div class="rk">${rank}</div><div class="nm2"></div><div class="sc">${e.s}</div>`;
     d.querySelector('.nm2').textContent=e.n;
     return d;
   };
   rows.forEach((e,i)=>lbList.appendChild(mkRow(e,i+1)));
-  const myIdx=myKey?all.findIndex(e=>lbKey(e)===myKey):-1;
+  const myIdx=all.findIndex(e=>(myPid&&e.id===myPid)||(myKey&&lbKey(e)===myKey));
   if(myIdx>=rows.length){                              // je suis hors du top affiché → ma ligne en bas
     const sep=document.createElement('div'); sep.className='lbEmpty'; sep.style.padding='4px'; sep.textContent='⋯';
     lbList.appendChild(sep);
@@ -2677,12 +2705,54 @@ function nameStatus(){
   if(saved){ nameMsg.className='ok'; nameMsg.textContent='✓ Pseudo enregistré : '+saved+' — tes parties comptent.'; }
   else { nameMsg.className='neutral'; nameMsg.textContent='Entre ton pseudo et valide : sans lui, tes parties ne sont pas classées.'; }
 }
+let nameBusy=false;
 function saveName(){
+  if(nameBusy) return;
   const raw=nameIn.value;
   if(!raw.trim()){ delete localStorage.nd_name; nameStatus(); renderBoard(); return; }
   const c=lbNameOk(raw);
-  if(c.ok){ localStorage.nd_name=c.name; nameIn.value=c.name; nameStatus(); renderBoard(); nameIn.blur(); }
-  else { nameMsg.className=''; nameMsg.textContent=c.msg; }
+  if(!c.ok){ nameMsg.className=''; nameMsg.textContent=c.msg; return; }
+  const oldName=(localStorage.nd_name||'').trim();
+  if(oldName===c.name){ nameStatus(); renderBoard(); nameIn.blur(); return; }   // inchangé
+  const pid=lbPid(), newKey=lbNormalize(c.name), oldKey=oldName?lbNormalize(oldName):'';
+  nameBusy=true; nameMsg.className='neutral'; nameMsg.textContent='Vérification du pseudo…';
+  lbFetchJson(LB_REMOTE).then(j=>{
+    const arr=(j&&Array.isArray(j.e))?j.e:[];
+    // pris = une ligne à ce nom qui n'est ni la mienne, ni ma vieille ligne d'avant les identités
+    const taken=arr.some(e=>{
+      if(!e || typeof e.n!=='string') return false;
+      if(lbNormalize(e.n.trim())!==newKey) return false;
+      if(e.id===pid) return false;                     // ma propre ligne (ex. changement de majuscules)
+      if(!e.id && oldKey && lbNormalize(e.n.trim())===oldKey) return false; // ma ligne pas encore adoptée
+      return true;
+    });
+    if(taken){
+      nameBusy=false; nameMsg.className='';
+      nameMsg.textContent='Ce pseudo est déjà pris par un autre joueur — choisis-en un autre.';
+      return;
+    }
+    // libre → j'enregistre, et je RENOMME ma ligne partout (pas de nouveau joueur créé)
+    localStorage.nd_name=c.name; nameIn.value=c.name;
+    lbSave(lbLoad().map(e=>Object.assign({},e,{n:c.name,id:pid})));   // l'historique local est à moi
+    let changed=false;
+    const upd=arr.map(e=>{
+      if(e && e.id===pid){ changed=true; return Object.assign({},e,{n:c.name}); }
+      if(e && !e.id && oldKey && typeof e.n==='string' && lbNormalize(e.n.trim())===oldKey){
+        changed=true; return Object.assign({},e,{n:c.name,id:pid});  // j'adopte + renomme ma vieille ligne
+      }
+      return e;
+    });
+    const done=()=>{ nameBusy=false; nameStatus(); renderBoard(); nameIn.blur(); };
+    if(changed){
+      const merged=lbClean(upd).slice(0,300);
+      lbRemoteCache=merged; lbRemoteState='on';
+      lbFetchJson(LB_REMOTE,{method:'PUT',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({v:1,g:'neon-dash',e:merged})}).then(done,done);
+    } else done();
+  }).catch(()=>{
+    nameBusy=false; nameMsg.className='';
+    nameMsg.textContent='Impossible de vérifier le pseudo — vérifie ta connexion et réessaie.';
+  });
 }
 document.getElementById('lbBtn').addEventListener('click',()=>{
   nameIn.value=localStorage.nd_name||'';
